@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 
 import mechfight as mf
+from laser_defense import LaserDefense
 from weapon_control import target_body, weapon_plan
 
 
@@ -261,7 +262,7 @@ def within_radius(position, center, radius):
 
 
 class Bot:
-    name = "farm-and-counter-v3"
+    name = "farm-and-laser-denial"
     SEEK_RESOURCES = True
     PICKUP_PRIORITY = {"laser": 3, "lightning": 2, "mortar": 1}
     UPGRADE_PRIORITY = {
@@ -272,6 +273,7 @@ class Bot:
     def __init__(self, hello):
         config = hello["config"]
         self.config = config
+        self.laser_defense = LaserDefense(config)
         self.world = GroundMap(Path(hello["map"]["dir"]) / "v2", config["mech"])
         self.waypoints = []
         self.last_goal = None
@@ -589,17 +591,26 @@ class Bot:
             magnitude = min(1.0, math.dist(position, waypoint) / 5.0)
             move = desired[0] * magnitude, desired[1] * magnitude
 
-        self.previous_move = move
         speed = math.hypot(*move)
         energy_floor = (6.0 if urgent else 23.0) if self.sprinting else (14.0 if urgent else 50.0)
         self.sprinting = (urgent or retreat) and me["energy"] >= energy_floor and speed > 0.8
+        boost = self.sprinting
+        if not urgent and zone["radius"] > 9.0:
+            move, boost, shooter, dodged = self.laser_defense.choose(obs, self.world, enemies, move, boost, goal)
+            if dodged:
+                mode = "laser-cover"
+            elif shooter is not None and (not finish or target is None):
+                target = shooter
+                mode = "laser-counter"
+        self.previous_move = move
+        speed = math.hypot(*move)
         yaw = math.atan2(move[1], move[0]) if speed > 0.1 else math.remainder(now * 0.65 + self.scanning_offset, 2 * math.pi)
-        action = {"move": list(move), "boost": self.sprinting, "aim": [yaw, 0.0], "jump": recovering and me["grounded"]}
+        action = {"move": list(move), "boost": boost, "aim": [yaw, 0.0], "jump": recovering and me["grounded"]}
 
         if target:
-            aim, fire = weapon_plan(me, target, self.world, self.config, retreat=retreat or urgent)
+            aim, fire = weapon_plan(me, target, self.world, self.config, retreat=retreat or urgent or mode == "laser-cover")
             action["aim"] = list(aim)
-            if finish or not retreat or incoming or target_distance < 75.0:
+            if finish or not retreat or incoming or target_distance < 75.0 or mode == "laser-counter":
                 action["fire"] = fire
         elif self.last_damage_bearing is not None and now - self.last_damage_at < 2.0:
             action["aim"] = [self.last_damage_bearing, 0.0]
