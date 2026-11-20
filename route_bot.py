@@ -44,9 +44,63 @@ class Polygon:
                 inside = not inside
         return inside
 
+    def crossings(self, point, delta):
+        px, py = point
+        dx, dy = delta
+        for (ax, ay), (bx, by) in self.edges:
+            ex, ey = bx - ax, by - ay
+            denominator = dx * ey - dy * ex
+            if abs(denominator) < 1e-9:
+                continue
+            lx, ly = ax - px, ay - py
+            edge_ratio = (lx * dy - ly * dx) / denominator
+            if 0.0 <= edge_ratio <= 1.0:
+                yield (lx * ey - ly * ex) / denominator
+
+
+class Prism:
+    def __init__(self, value):
+        self.outline = Polygon(value["ring"])
+        self.holes = tuple(Polygon(ring) for ring in value["holes"])
+        self.base = value["base"]
+        self.top = value["top"]
+
+    def blocks_ray(self, start, end):
+        x, y, z = start
+        dx, dy, dz = (b - a for a, b in zip(start, end))
+        low, high = 0.0, 1.0
+        if abs(dz) < 1e-9:
+            if z < self.base or z > self.top:
+                return False
+        else:
+            floor, ceiling = sorted(((self.base - z) / dz, (self.top - z) / dz))
+            low, high = max(low, floor), min(high, ceiling)
+            if low >= high:
+                return False
+
+        a, b = (x + dx * low, y + dy * low), (x + dx * high, y + dy * high)
+        min_x, max_x, min_y, max_y = self.outline.bounds
+        if max(a[0], b[0]) < min_x or min(a[0], b[0]) > max_x:
+            return False
+        if max(a[1], b[1]) < min_y or min(a[1], b[1]) > max_y:
+            return False
+
+        # The material changes only where the ray crosses an outline or a hole.
+        intervals = [low, high]
+        for polygon in (self.outline, *self.holes):
+            intervals.extend(t for t in polygon.crossings((x, y), (dx, dy)) if low < t < high)
+        intervals.sort()
+        for first, last in zip(intervals, intervals[1:]):
+            middle = (first + last) / 2.0
+            point = x + dx * middle, y + dy * middle
+            if self.outline.contains(point) and not any(hole.contains(point) for hole in self.holes):
+                return True
+        return False
+
 
 class GroundMap:
     GRID = 6.0
+    RAY_BUCKET = 24.0
     NEIGHBORS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
 
     def __init__(self, path, stats):
@@ -65,17 +119,20 @@ class GroundMap:
         self.points = {(x, y): self.point((x, y)) for x in range(self.width) for y in range(self.depth)}
         self.elevation = {cell: self.ground(*point) for cell, point in self.points.items()}
         blocked = set()
-        for prism in world["prisms"]:
-            shape = Polygon(prism["ring"])
-            holes = [Polygon(ring) for ring in prism["holes"]]
+        self.ray_buckets = {}
+        for value in world["prisms"]:
+            prism = Prism(value)
+            shape, holes = prism.outline, prism.holes
             min_x, max_x, min_y, max_y = shape.bounds
+            for key in self.ray_bucket_keys(min_x, max_x, min_y, max_y):
+                self.ray_buckets.setdefault(key, []).append(prism)
             first_x, first_y = self.cell((min_x - self.radius, min_y - self.radius))
             last_x, last_y = self.cell((max_x + self.radius, max_y + self.radius))
             for x in range(max(0, first_x), min(self.width, last_x + 1)):
                 for y in range(max(0, first_y), min(self.depth, last_y + 1)):
                     cell = (x, y)
                     ground = self.elevation[cell]
-                    if prism["base"] >= ground + stats["height"] or prism["top"] <= ground + stats["step_up"]:
+                    if prism.base >= ground + stats["height"] or prism.top <= ground + stats["step_up"]:
                         continue
                     point = self.points[cell]
                     if shape.intersects_disc(point, self.radius) and not any(
@@ -84,6 +141,29 @@ class GroundMap:
                         blocked.add(cell)
         self.open = self.points.keys() - blocked
         self.edges = {cell: tuple(self.walk_neighbors(cell)) for cell in self.open}
+
+    def ray_bucket_keys(self, min_x, max_x, min_y, max_y):
+        step = self.RAY_BUCKET
+        for x in range(math.floor(min_x / step), math.floor(max_x / step) + 1):
+            for y in range(math.floor(min_y / step), math.floor(max_y / step) + 1):
+                yield x, y
+
+    def blocked_between(self, start, end):
+        (x, y, z), (tx, ty, tz) = start, end
+        min_x, max_x = sorted((x, tx))
+        min_y, max_y = sorted((y, ty))
+        prisms = set()
+        for key in self.ray_bucket_keys(min_x, max_x, min_y, max_y):
+            prisms.update(self.ray_buckets.get(key, ()))
+        if any(prism.blocks_ray(start, end) for prism in prisms):
+            return True
+        steps = max(2, math.ceil(math.hypot(tx - x, ty - y) / 3.0))
+        for step in range(1, steps):
+            ratio = step / steps
+            ground = self.ground(x + (tx - x) * ratio, y + (ty - y) * ratio)
+            if ground > z + (tz - z) * ratio:
+                return True
+        return False
 
     def ground(self, x, y):
         terrain = self.terrain
@@ -180,7 +260,8 @@ def within_radius(position, center, radius):
 
 
 class Bot:
-    name = "ground-route-v0"
+    name = "solid-cover-v1"
+    SEEK_RESOURCES = True
     UPGRADE_PRIORITY = {
         "armor": 0, "nanites": 1, "servos": 2, "plating": 3,
         "reactor": 4, "capacitor": 5, "sensors": 6,
@@ -196,6 +277,116 @@ class Bot:
         self.previous_move = (0.0, 0.0)
         self.recovery_until = 0.0
         self.recovery_heading = (0.0, 0.0)
+        self.last_damage_at = -math.inf
+        self.last_damage_bearing = None
+        self.hit_at = -math.inf
+        self.cover_goal = None
+        self.cover_checked_at = -math.inf
+        self.sprinting = False
+        self.scanning_offset = (hello["seed"] % 1000) / 1000.0 * 2.0 * math.pi
+
+    def threat_sources(self, obs, position, enemies):
+        now = obs["t"]
+        for event in obs["events"]:
+            if event["type"] == "damaged" and event["bearing"] is not None:
+                self.last_damage_at = now
+                self.last_damage_bearing = event["bearing"]
+            elif event["type"] == "hit" and event["target"] < 100:
+                self.hit_at = now
+
+        threats = [
+            (enemy["pos"][0], enemy["pos"][1], enemy["pos"][2] + 7.0)
+            for enemy in enemies[:2] if math.dist(position, enemy["pos"][:2]) < 155.0
+        ]
+        if not threats and now - self.last_damage_at < 3.0 and self.last_damage_bearing is not None:
+            x = position[0] + 75.0 * math.cos(self.last_damage_bearing)
+            y = position[1] + 75.0 * math.sin(self.last_damage_bearing)
+            threats.append((x, y, self.world.ground(x, y) + 7.0))
+        return threats
+
+    def cover_position(self, position, threats, zone_center, zone_radius):
+        nearest = threats[0]
+        heading = math.atan2(position[1] - nearest[1], position[0] - nearest[0])
+        best, best_score = None, -math.inf
+        candidates = {self.world.cell(position): position}
+        for distance in (18.0, 33.0):
+            for angle in (0.0, 0.65, -0.65, 1.3, -1.3):
+                x = position[0] + distance * math.cos(heading + angle)
+                y = position[1] + distance * math.sin(heading + angle)
+                projected = within_radius((x, y), zone_center, zone_radius)
+                cell = self.world.nearest_open(projected, search=2)
+                if cell is not None:
+                    candidates.setdefault(cell, self.world.points[cell])
+
+        for point in candidates.values():
+            if math.dist(point, zone_center) > zone_radius + 3.0:
+                continue
+            elevation = self.world.ground(*point) + 5.0
+            covered = sum(self.world.blocked_between(source, (*point, elevation)) for source in threats)
+            closest = min(math.dist(source[:2], point) for source in threats)
+            score = 42.0 * covered + 0.7 * closest - 0.55 * math.dist(position, point)
+            if score > best_score:
+                best, best_score = point, score
+        return best
+
+    def gun_action(self, action, me, enemy, distance, shoot):
+        gun = me["weapons"][0]
+        speed = gun["stats"].get("speed", 252.0) if gun else 252.0
+        flight = distance / speed
+        point = [target + velocity * flight for target, velocity in zip(enemy["pos"], enemy["vel"])]
+        point[2] += 4.5 * (1.0 + 0.05 * enemy.get("cubes", 0))
+        muzzle = (*me["pos"][:2], me["pos"][2] + me["stats"]["muzzle_height"])
+        dx, dy, dz = [target - origin for target, origin in zip(point, muzzle)]
+        yaw = math.atan2(dy, dx)
+        pitch = math.atan2(dz, math.hypot(dx, dy))
+        pitch = min(me["stats"]["max_pitch"], max(me["stats"]["min_pitch"], pitch))
+        action["aim"] = [yaw, pitch]
+        aimed = abs(math.remainder(yaw - me["aim"][0], 2 * math.pi)) < 0.075
+        aimed = aimed and abs(pitch - me["aim"][1]) < 0.09
+        if gun and shoot and aimed and not self.world.blocked_between(muzzle, point):
+            action["fire"] = [True, False]
+
+    def resource_goal(self, obs, position, enemies):
+        me, zone = obs["self"], obs["zone"]
+        if any(sound["dist"] == "near" and sound["kind"] in {"gun", "mortar", "lightning", "laser"}
+               for sound in obs["sounds"]):
+            return None
+
+        current_center = tuple(zone["center"])
+        current_radius = max(0.0, zone["radius"] - 3.0)
+        next_center = tuple(zone["next_center"])
+        next_radius = max(0.0, zone["next_radius"] - 4.0)
+        walk_speed = me["stats"]["walk_speed"]
+
+        def safely_inside(point):
+            return math.dist(point, current_center) <= current_radius and math.dist(point, next_center) <= next_radius
+
+        viable_drops = []
+        for drop in obs["drops"]:
+            point = tuple(drop["pos"][:2])
+            distance = math.dist(position, point)
+            if distance > 70.0 or (drop["holder"] is not None and drop["holder"] != me["id"]):
+                continue
+            if not safely_inside(point) or any(math.dist(enemy["pos"][:2], point) < 65.0 for enemy in enemies):
+                continue
+            if abs(me["pos"][2] - drop["pos"][2]) > 9.0:
+                continue
+            eta = 1.4 * distance / walk_speed
+            if drop["lands_in"] > eta + 3.0:
+                continue
+            if me["hp"] < 0.85 * me["max_hp"] or me["energy"] < 0.5 * me["max_energy"] or me["cubes"] < 4:
+                viable_drops.append((eta + drop["lands_in"] - drop["progress"], point))
+        if viable_drops:
+            return min(viable_drops)[1], "supply"
+
+        viable_cubes = []
+        if me["cubes"] < 10:
+            for cube in obs["cubes"]:
+                point = tuple(cube["pos"][:2])
+                distance = math.dist(position, point)
+                if distance <= 26.0 and abs(me["pos"][2] - cube["pos"][2]) < 4.0 and safely_inside(point):
+                    viable_cubes.append((distance, point))
+        return (min(viable_cubes)[1], "cube") if viable_cubes else None
 
     def act(self, obs):
         me, zone, now = obs["self"], obs["zone"], obs["t"]
@@ -205,17 +396,35 @@ class Bot:
         inside_goal = within_radius(position, next_center, next_radius)
         urgent = not me["in_zone"]
         goal = inside_goal
+        mode = "rotate" if math.dist(position, inside_goal) >= 3.5 else "hold"
         if urgent:
             goal = within_radius(position, tuple(zone["center"]), max(0.0, zone["radius"] - 9.0))
+            mode = "zone"
 
-        enemies = [enemy for enemy in obs["mechs"] if enemy["kind"] == "mech"]
-        nearest = min(enemies, key=lambda enemy: math.dist(me["pos"], enemy["pos"]), default=None)
+        enemies = sorted(
+            (enemy for enemy in obs["mechs"] if enemy["kind"] == "mech"),
+            key=lambda enemy: math.dist(me["pos"], enemy["pos"]),
+        )
+        nearest = enemies[0] if enemies else None
         distance = math.dist(me["pos"], nearest["pos"]) if nearest else math.inf
-        retreat = distance < 35.0 or (distance < 85.0 and me["hp"] < me["max_hp"] * 0.8)
+        threats = self.threat_sources(obs, position, enemies)
+        health = me["hp"] / me["max_hp"]
+        reset = health < 0.82 and now - max(self.last_damage_at, self.hit_at) < 7.0
+        crowded = len(threats) >= 2 and obs["alive"] > 4
+        retreat = distance < 32.0 or (bool(threats) and (reset or health < 0.72 or crowded))
         if retreat and not urgent and math.dist(position, inside_goal) < 20.0:
-            dx, dy = unit_toward(nearest["pos"][:2], position)
-            escape = position[0] + 35.0 * dx, position[1] + 35.0 * dy
-            goal = within_radius(escape, next_center, next_radius)
+            if now - self.cover_checked_at >= 0.8:
+                self.cover_goal = self.cover_position(position, threats, next_center, next_radius)
+                self.cover_checked_at = now
+            if self.cover_goal is not None:
+                goal = self.cover_goal
+                mode = "cover"
+        else:
+            self.cover_goal = None
+            if self.SEEK_RESOURCES and mode == "hold" and distance > 100.0 and not reset:
+                resource = self.resource_goal(obs, position, enemies)
+                if resource is not None:
+                    goal, mode = resource
 
         moving = math.hypot(*self.previous_move) > 0.1
         slow = math.hypot(*me["vel"][:2]) < 0.9
@@ -231,6 +440,7 @@ class Bot:
         recovering = now < self.recovery_until
         if recovering:
             move = self.recovery_heading
+            mode = "unstuck"
         elif math.dist(position, goal) < 3.5:
             self.waypoints.clear()
             move = (0.0, 0.0)
@@ -249,25 +459,28 @@ class Bot:
             move = desired[0] * magnitude, desired[1] * magnitude
 
         self.previous_move = move
-        boost = (urgent or retreat) and me["energy"] > 32.0 and math.hypot(*move) > 0.8
-        yaw = math.atan2(move[1], move[0]) if math.hypot(*move) > 0.1 else me["aim"][0]
-        action = {"move": list(move), "boost": boost, "aim": [yaw, 0.0], "jump": recovering and me["grounded"]}
+        speed = math.hypot(*move)
+        energy_floor = (6.0 if urgent else 23.0) if self.sprinting else (14.0 if urgent else 50.0)
+        self.sprinting = (urgent or retreat) and me["energy"] >= energy_floor and speed > 0.8
+        yaw = math.atan2(move[1], move[0]) if speed > 0.1 else math.remainder(now * 0.65 + self.scanning_offset, 2 * math.pi)
+        action = {"move": list(move), "boost": self.sprinting, "aim": [yaw, 0.0], "jump": recovering and me["grounded"]}
 
-        if nearest and distance < 120.0:
-            gun = me["weapons"][0]
-            speed = gun["stats"].get("speed", 252.0) if gun else 252.0
-            flight = distance / speed
-            dx, dy, dz = [
-                target + velocity * flight - origin
-                for target, velocity, origin in zip(nearest["pos"], nearest["vel"], me["pos"])
-            ]
-            yaw = math.atan2(dy, dx)
-            pitch = math.atan2(dz - me["stats"]["muzzle_height"] + 4.5, math.hypot(dx, dy))
-            pitch = min(me["stats"]["max_pitch"], max(me["stats"]["min_pitch"], pitch))
-            action["aim"] = [yaw, pitch]
-            aimed = abs(math.remainder(yaw - me["aim"][0], 2 * math.pi)) < 0.075
-            aimed = aimed and abs(pitch - me["aim"][1]) < 0.09
-            action["fire"] = [aimed and not urgent and (not retreat or distance < 20.0), False]
+        if nearest and distance < 155.0:
+            shoot = distance < 120.0 and not urgent and (not retreat or distance < 18.0)
+            self.gun_action(action, me, nearest, distance, shoot)
+        elif self.last_damage_bearing is not None and now - self.last_damage_at < 2.0:
+            action["aim"] = [self.last_damage_bearing, 0.0]
+
+        gun = me["weapons"][0]
+        if gun and gun["kind"] == "gun" and distance > 95.0 and not action.get("fire"):
+            if gun.get("ammo", 12) < gun["stats"].get("mag", 12) * 0.5 and gun.get("reload", 0) == 0:
+                action["reload"] = True
+
+        if obs["tick"] % 10 == 0:
+            mf.draw.label(f"{mode} | hp {me['hp']:.0f} | alive {obs['alive']}")
+            if self.waypoints:
+                point = self.waypoints[0]
+                mf.draw.point([*point, self.world.ground(*point)], "#74dded", 4)
 
         if obs["offer"]:
             choices = obs["offer"]["choices"]
