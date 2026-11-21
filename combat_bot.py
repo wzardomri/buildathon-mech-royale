@@ -3,6 +3,7 @@
 import math
 
 import mechfight as mf
+from lane_isolation import LaneIsolation
 from route_bot import Bot as RouteBot
 from weapon_control import target_body, weapon_plan
 
@@ -13,12 +14,13 @@ def unit(x, y):
 
 
 class Bot(RouteBot):
-    name = "offensive-upgrades-v13"
+    name = "lane-isolation-v13"
 
     def __init__(self, hello):
         super().__init__(hello)
         self.rules = hello["config"]
         self.slot = hello["slot"]
+        self.lane_isolation = LaneIsolation(self.rules)
 
     def fight_target(self, obs, me, position):
         muzzle = (position[0], position[1], me["pos"][2] + me["stats"]["muzzle_height"])
@@ -70,26 +72,38 @@ class Bot(RouteBot):
         return preferred
 
     def act(self, obs):
+        action, foe = self.combat_action(obs)
+        if self.active_mode not in {"fight", "hold"}:
+            self.lane_isolation.plan = None
+            return action
+        isolation = self.lane_isolation.choose(obs, self.world, action, foe)
+        if isolation is not None:
+            move, boost = isolation
+            action["move"], action["boost"] = list(move), boost
+            self.previous_move, self.sprinting = move, boost
+        return action
+
+    def combat_action(self, obs):
         action = super().act(obs)
         me = obs["self"]
         position = tuple(me["pos"][:2])
         if self.active_mode not in {"fight", "hold", "rotate", "cover"}:
-            return action
+            return action, None
         foe = self.fight_target(obs, me, position)
         if foe is None or obs["t"] < self.recovery_until:
-            return action
+            return action, None
         if self.active_mode == "cover":
             nearby = sum(enemy["kind"] == "mech" and math.dist(enemy["pos"], me["pos"]) < 100
                          for enemy in obs["mechs"])
             # The route policy can label simply moving away as cover. Keep
             # real shelter and outnumbered retreats, but contest an open duel.
             if nearby > 1 or self.cover_goal is None:
-                return action
+                return action, None
             x, y = self.cover_goal
             body_height = me["stats"]["height"] * 0.55
             source = (*foe["pos"][:2], foe["pos"][2] + self.rules["mech"]["muzzle_height"])
             if self.world.blocked_between(source, (x, y, self.world.ground(x, y) + body_height)):
-                return action
+                return action, None
         distance = math.dist(position, foe["pos"][:2])
         low = me["hp"] < 0.25 * me["max_hp"]
         can_fight = me["in_zone"] and (not low or distance < 26 or foe.get("hp", 1300) < 300)
@@ -106,7 +120,7 @@ class Bot(RouteBot):
         action["fire"] = triggers if can_fight or distance < 29 else [False, False]
         if any(action["fire"]):
             action["reload"] = False
-        return action
+        return action, foe if can_fight else None
 
 
 if __name__ == "__main__":
