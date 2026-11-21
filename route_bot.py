@@ -7,7 +7,9 @@ import math
 from pathlib import Path
 import sys
 
+from circle_anchor import CircleAnchor
 import mechfight as mf
+from opening_loot import OpeningLoot
 from weapon_control import target_body, weapon_plan
 
 
@@ -209,7 +211,7 @@ class GroundMap:
             if rise <= self.max_slope * length:
                 yield destination, length + 0.8 * max(0.0, rise)
 
-    def route(self, position, goal):
+    def route(self, position, goal, *, probe_limit=None):
         start, finish = self.nearest_open(position), self.nearest_open(goal, search=8)
         if start is None or finish is None:
             return []
@@ -221,7 +223,7 @@ class GroundMap:
         parents = {}
         queue = [(start_distance, 0.0, start)]
         closest, remaining = start, start_distance
-        for _ in range(1_500):
+        for _ in range(1_500 if probe_limit is None else probe_limit):
             if not queue:
                 break
             _, cost, cell = heapq.heappop(queue)
@@ -239,6 +241,8 @@ class GroundMap:
                     parents[neighbor] = cell
                     priority = total + 1.45 * math.dist(self.points[neighbor], finish_point)
                     heapq.heappush(queue, (priority, total, neighbor))
+        if probe_limit is not None and closest != finish:
+            return []
         route = []
         while closest != start:
             route.append(self.points[closest])
@@ -303,6 +307,8 @@ class Bot:
         self.combat_target = None
         self.combat_checked_at = -math.inf
         self.strafe_sign = 1 if hello["seed"] % 2 else -1
+        self.opening_loot = OpeningLoot(config["loot"]["pickup_radius"], self.DETOUR_DISTANCE)
+        self.circle_anchor = CircleAnchor()
 
     def threat_sources(self, obs, position, enemies):
         now = obs["t"]
@@ -558,11 +564,22 @@ class Bot:
         next_center = tuple(zone["next_center"])
         inside_goal = within_radius(position, next_center, next_radius)
         urgent = not me["in_zone"]
+        previous_anchor = self.circle_anchor.anchor
+        if not urgent:
+            inside_goal = self.circle_anchor.choose(obs, self.world, inside_goal, next_center, zone["next_radius"])
         goal = inside_goal
         mode = "rotate" if math.dist(position, inside_goal) >= 3.5 else "hold"
         if urgent:
             goal = within_radius(position, tuple(zone["center"]), max(0.0, zone["radius"] - 9.0))
+            goal = self.circle_anchor.choose(obs, self.world, goal, zone["center"], zone["radius"])
             mode = "zone"
+        anchor = self.circle_anchor.anchor
+        if anchor != previous_anchor and self.waypoints and (
+            anchor is None or math.dist(self.waypoints[-1], anchor) > 3.5
+        ):
+            self.waypoints.clear()
+            self.last_goal = None
+            self.replanned_at = -math.inf
 
         enemies = sorted(
             (enemy for enemy in obs["mechs"] if enemy["kind"] == "mech"),
@@ -581,7 +598,9 @@ class Bot:
         reset = health < 0.60 and now - max(self.last_player_damage_at, self.hit_at) < 7.0
         retreat = bool(threats) and not finish and (health < 0.41 or reset or (incoming and crowded and health < 0.77))
         target = enemy_target
+        prior_detour = self.opening_loot.detour
         if retreat and not urgent and math.dist(position, inside_goal) < 20.0:
+            self.opening_loot.detour = None
             if now - self.cover_checked_at >= 0.8:
                 self.cover_goal = self.cover_position(position, threats, next_center, next_radius)
                 self.cover_checked_at = now
@@ -590,19 +609,26 @@ class Bot:
                 mode = "cover"
         else:
             self.cover_goal = None
+            resource = None
             if mode == "rotate":
                 weapon = self.early_weapon_detour(obs, position, distance)
                 if weapon is not None:
-                    goal, mode = weapon, "early-weapon"
+                    resource = weapon, "early-weapon"
+            elif mode == "hold" and self.SEEK_RESOURCES and distance > 120.0 and not incoming:
+                resource = self.resource_goal(obs, position, enemies)
+            if mode in {"rotate", "hold"} and (resource is None or prior_detour is not None):
+                detour = self.opening_loot.choose(obs, self.world, inside_goal, distance, self.last_player_damage_at)
+                if detour is not None:
+                    resource = detour, "early-weapon"
+            if mode == "zone":
+                self.opening_loot.detour = None
+            if resource is not None:
+                goal, mode = resource
             if mode == "hold":
                 if self.SEEK_RESOURCES and distance > 120.0 and not incoming:
-                    resource = self.resource_goal(obs, position, enemies)
-                    if resource is not None:
-                        goal, mode = resource
-                    else:
-                        farm = self.farm_target(obs, distance)
-                        if farm is not None:
-                            target, mode = farm, "farm"
+                    farm = self.farm_target(obs, distance)
+                    if farm is not None:
+                        target, mode = farm, "farm"
                 if mode == "hold" and enemy_target:
                     mode = "fight"
                 if mode in {"farm", "fight"}:
@@ -612,6 +638,11 @@ class Bot:
                     goal = self.combat_goal
                 else:
                     self.combat_goal = None
+
+        if self.opening_loot.detour is not prior_detour:
+            self.waypoints.clear()
+            self.last_goal = None
+            self.replanned_at = -math.inf
 
         moving = math.hypot(*self.previous_move) > 0.1
         slow = math.hypot(*me["vel"][:2]) < 0.9

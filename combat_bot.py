@@ -3,7 +3,9 @@
 import math
 
 import mechfight as mf
+from finish_transition import FinishTransition
 from route_bot import Bot as RouteBot
+from sound_acquisition import SoundAcquisition
 from weapon_control import target_body, weapon_plan
 
 
@@ -13,12 +15,16 @@ def unit(x, y):
 
 
 class Bot(RouteBot):
-    name = "offensive-upgrades-v13"
+    name = "wave-control"
+    CONFIRM_SOUND = True
 
     def __init__(self, hello):
         super().__init__(hello)
         self.rules = hello["config"]
         self.slot = hello["slot"]
+        self.sound_acquisition = SoundAcquisition(self.rules)
+        self.finish_transition = FinishTransition(self.rules)
+        self.last_policy = "base"
 
     def fight_target(self, obs, me, position):
         muzzle = (position[0], position[1], me["pos"][2] + me["stats"]["muzzle_height"])
@@ -69,7 +75,7 @@ class Bot(RouteBot):
                     return [x, y]
         return preferred
 
-    def act(self, obs):
+    def combat_action(self, obs):
         action = super().act(obs)
         me = obs["self"]
         position = tuple(me["pos"][:2])
@@ -106,6 +112,31 @@ class Bot(RouteBot):
         action["fire"] = triggers if can_fight or distance < 29 else [False, False]
         if any(action["fire"]):
             action["reload"] = False
+        return action
+
+    def act(self, obs):
+        self.last_policy = "base"
+        action = self.combat_action(obs)
+        if self.circle_anchor.anchor is not None and self.active_mode in {"rotate", "zone"}:
+            if self.last_policy == "base":
+                self.last_policy = "circle-anchor"
+        if self.opening_loot.detour is not None and self.active_mode == "early-weapon":
+            self.last_policy = "opening-loot"
+        if self.CONFIRM_SOUND:
+            bearing = self.sound_acquisition.choose(obs, action, self.active_mode, self.last_damage_at, self.world)
+            if bearing is not None:
+                action["aim"] = [bearing, action["aim"][1]]
+                self.last_policy = "sound"
+        move, reload = self.finish_transition.choose(obs, self.world, action, self.active_mode)
+        if self.last_policy in {"base", "opening-loot"}:
+            if move is not None:
+                action["move"], action["boost"] = list(move), False
+                self.previous_move, self.sprinting = move, False
+                self.last_policy = "finish-loot"
+            if reload and not action.get("reload"):
+                action["reload"] = True
+                if move is None:
+                    self.last_policy = "finish-reload"
         return action
 
 
