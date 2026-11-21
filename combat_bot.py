@@ -13,7 +13,7 @@ def unit(x, y):
 
 
 class Bot(RouteBot):
-    name = "offensive-upgrades-v13"
+    name = "confirmed-kill-loot-v14"
 
     def __init__(self, hello):
         super().__init__(hello)
@@ -73,7 +73,7 @@ class Bot(RouteBot):
         action = super().act(obs)
         me = obs["self"]
         position = tuple(me["pos"][:2])
-        if self.active_mode not in {"fight", "hold", "rotate", "cover"}:
+        if self.active_mode not in {"fight", "hold", "rotate", "cover", "kill-cubes"}:
             return action
         foe = self.fight_target(obs, me, position)
         if foe is None or obs["t"] < self.recovery_until:
@@ -96,7 +96,9 @@ class Bot(RouteBot):
         zone = obs["zone"]
         required = max(0.0, math.dist(position, zone["next_center"]) - zone["next_radius"])
         slack = zone["shrink_end"] - obs["t"]
-        if can_fight and (required < 3.0 or slack > 12.0 + 2.0 * required / me["stats"]["walk_speed"]):
+        if can_fight and self.active_mode != "kill-cubes" and (
+            required < 3.0 or slack > 12.0 + 2.0 * required / me["stats"]["walk_speed"]
+        ):
             action["move"] = self.strafe(obs, foe, position, action["move"])
             action["boost"] = me["energy"] > 47 and (distance < 42 or distance > 130)
             self.previous_move = tuple(action["move"])
