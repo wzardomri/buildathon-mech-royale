@@ -1,6 +1,7 @@
 """First-pass ground routing and survival policy for the fictional arena."""
 
 from array import array
+from hashlib import sha256
 import heapq
 import json
 import math
@@ -8,6 +9,7 @@ from pathlib import Path
 import sys
 
 import mechfight as mf
+from colliding_route import CollidingRoute
 from weapon_control import target_body, weapon_plan
 
 
@@ -105,9 +107,14 @@ class GroundMap:
     NEIGHBORS = ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1))
 
     def __init__(self, path, stats):
-        world = json.loads((path / "world.json").read_text())
+        world_data = (path / "world.json").read_bytes()
+        terrain_data = (path / "terrain.i16").read_bytes()
+        world = json.loads(world_data)
+        sha = sha256(world_data)
+        sha.update(terrain_data)
+        self.arena_signature = sha.hexdigest()
         self.terrain = world["terrain"]
-        self.heights = array("h", (path / "terrain.i16").read_bytes())
+        self.heights = array("h", terrain_data)
         if sys.byteorder != "little":
             self.heights.byteswap()
         bounds = world["bounds"]
@@ -209,7 +216,7 @@ class GroundMap:
             if rise <= self.max_slope * length:
                 yield destination, length + 0.8 * max(0.0, rise)
 
-    def route(self, position, goal):
+    def route(self, position, goal, *, obstruction=None, probe_limit=1500):
         start, finish = self.nearest_open(position), self.nearest_open(goal, search=8)
         if start is None or finish is None:
             return []
@@ -221,7 +228,7 @@ class GroundMap:
         parents = {}
         queue = [(start_distance, 0.0, start)]
         closest, remaining = start, start_distance
-        for _ in range(1_500):
+        for _ in range(probe_limit):
             if not queue:
                 break
             _, cost, cell = heapq.heappop(queue)
@@ -235,6 +242,8 @@ class GroundMap:
             for neighbor, step in self.edges[cell]:
                 total = cost + step
                 if total < distances.get(neighbor, math.inf):
+                    if obstruction is not None and obstruction(cell, neighbor):
+                        continue
                     distances[neighbor] = total
                     parents[neighbor] = cell
                     priority = total + 1.45 * math.dist(self.points[neighbor], finish_point)
@@ -303,6 +312,7 @@ class Bot:
         self.combat_target = None
         self.combat_checked_at = -math.inf
         self.strafe_sign = 1 if hello["seed"] % 2 else -1
+        self.colliding_route = CollidingRoute(self.world)
 
     def threat_sources(self, obs, position, enemies):
         now = obs["t"]
@@ -616,6 +626,14 @@ class Bot:
         moving = math.hypot(*self.previous_move) > 0.1
         slow = math.hypot(*me["vel"][:2]) < 0.9
         self.stalled_for = self.stalled_for + 1 if moving and slow else 0
+        if (mode == "rotate" and self.stalled_for >= 5 and now >= self.recovery_until
+                and distance > 150.0 and not obs["projectiles"] and now - self.last_player_damage_at > 4.0):
+            alternative = self.colliding_route.choose(obs, self.world, position, goal, self.waypoints)
+            if alternative:
+                self.waypoints = alternative
+                self.last_goal = goal
+                self.replanned_at = now
+                self.stalled_for = 0
         if self.stalled_for >= 5 and now >= self.recovery_until:
             dx, dy = self.previous_move
             left = position[0] - dy * 8.0, position[1] + dx * 8.0
@@ -623,6 +641,7 @@ class Bot:
             self.recovery_until = now + 0.65
             self.waypoints = []
             self.last_goal = None
+            self.colliding_route.active = False
 
         recovering = now < self.recovery_until
         if recovering:
@@ -631,6 +650,7 @@ class Bot:
         elif math.dist(position, goal) < 3.5:
             self.waypoints.clear()
             move = (0.0, 0.0)
+            self.colliding_route.active = False
         else:
             changed = self.last_goal is None or math.dist(goal, self.last_goal) > 18.0
             while self.waypoints and math.dist(position, self.waypoints[0]) < 2.7:
@@ -639,6 +659,7 @@ class Bot:
                 self.waypoints = self.world.route(position, goal)
                 self.last_goal = goal
                 self.replanned_at = now
+                self.colliding_route.active = False
             waypoint = self.waypoints[0] if self.waypoints else goal
             if mode in {"cube", "weapon", "early-weapon", "supply"} and len(self.waypoints) <= 1 and math.dist(position, goal) < 8.0:
                 body_height = me["stats"]["height"] / 2.0
@@ -691,6 +712,7 @@ class Bot:
                     key=lambda i: self.UPGRADE_PRIORITY.get(choices[i]["id"], len(self.UPGRADE_PRIORITY)),
                 )
         self.active_mode = mode
+        self.last_policy = "prism-reroute" if self.colliding_route.active and mode == "rotate" else "base"
         return action
 
 

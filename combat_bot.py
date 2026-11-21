@@ -3,6 +3,7 @@
 import math
 
 import mechfight as mf
+from projectile_evasion import clears_route, evasive_move, projected_motion
 from route_bot import Bot as RouteBot
 from weapon_control import target_body, weapon_plan
 
@@ -19,6 +20,8 @@ class Bot(RouteBot):
         super().__init__(hello)
         self.rules = hello["config"]
         self.slot = hello["slot"]
+        self.last_policy = "base"
+        self.dodge_plan = None
 
     def fight_target(self, obs, me, position):
         muzzle = (position[0], position[1], me["pos"][2] + me["stats"]["muzzle_height"])
@@ -69,7 +72,7 @@ class Bot(RouteBot):
                     return [x, y]
         return preferred
 
-    def act(self, obs):
+    def combat_action(self, obs):
         action = super().act(obs)
         me = obs["self"]
         position = tuple(me["pos"][:2])
@@ -106,6 +109,36 @@ class Bot(RouteBot):
         action["fire"] = triggers if can_fight or distance < 29 else [False, False]
         if any(action["fire"]):
             action["reload"] = False
+        return action
+
+    def act(self, obs):
+        self.last_policy = "base"
+        action = self.combat_action(obs)
+        me = obs["self"]
+        if (self.active_mode not in {"fight", "hold", "rotate", "cover"} or action.get("jump")
+                or not obs["projectiles"] or not me["in_zone"]
+                or any(w and w["kind"] == "laser" and (w.get("charge", 0.) > 0. or firing)
+                       for w, firing in zip(me["weapons"], action.get("fire", (False, False))))):
+            self.dodge_plan = None
+            return action
+        if self.dodge_plan is not None:
+            move, boost, expires, shot = self.dodge_plan
+            if (obs["t"] >= expires or not me["grounded"] or boost and me["energy"] < 24.
+                    or not any(p["id"] == shot for p in obs["projectiles"])
+                    or not clears_route(self.world, obs, projected_motion(me, action["move"], action["boost"]),
+                                        projected_motion(me, move, boost))):
+                self.dodge_plan = None
+        if self.dodge_plan is None:
+            dodge = evasive_move(obs, self.world, action["move"], action["boost"], allow_burst=True)
+            if dodge is None:
+                return action
+            move, boost, until_impact, shot = dodge
+            self.dodge_plan = move, boost, obs["t"] + until_impact + .06, shot
+        move, boost, _, _ = self.dodge_plan
+        action.update(move=list(move), boost=boost)
+        self.previous_move = move
+        self.sprinting = boost
+        self.last_policy = "projectile-commit"
         return action
 
 
