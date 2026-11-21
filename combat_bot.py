@@ -4,6 +4,7 @@ import math
 
 import mechfight as mf
 from route_bot import Bot as RouteBot
+from weak_pursuit import WeakPursuit
 from weapon_control import target_body, weapon_plan
 
 
@@ -13,12 +14,15 @@ def unit(x, y):
 
 
 class Bot(RouteBot):
-    name = "offensive-upgrades-v13"
+    name = "weak-opponent-pursuit-v35"
+    FINISH_PURSUIT = True
 
     def __init__(self, hello):
         super().__init__(hello)
         self.rules = hello["config"]
         self.slot = hello["slot"]
+        self.pursuit = WeakPursuit(self.rules)
+        self.pursuit_foe = None
 
     def fight_target(self, obs, me, position):
         muzzle = (position[0], position[1], me["pos"][2] + me["stats"]["muzzle_height"])
@@ -69,7 +73,8 @@ class Bot(RouteBot):
                     return [x, y]
         return preferred
 
-    def act(self, obs):
+    def combat_action(self, obs):
+        self.pursuit_foe = None
         action = super().act(obs)
         me = obs["self"]
         position = tuple(me["pos"][:2])
@@ -97,6 +102,7 @@ class Bot(RouteBot):
         required = max(0.0, math.dist(position, zone["next_center"]) - zone["next_radius"])
         slack = zone["shrink_end"] - obs["t"]
         if can_fight and (required < 3.0 or slack > 12.0 + 2.0 * required / me["stats"]["walk_speed"]):
+            self.pursuit_foe = foe
             action["move"] = self.strafe(obs, foe, position, action["move"])
             action["boost"] = me["energy"] > 47 and (distance < 42 or distance > 130)
             self.previous_move = tuple(action["move"])
@@ -106,6 +112,17 @@ class Bot(RouteBot):
         action["fire"] = triggers if can_fight or distance < 29 else [False, False]
         if any(action["fire"]):
             action["reload"] = False
+        return action
+
+    def act(self, obs):
+        action = self.combat_action(obs)
+        if self.FINISH_PURSUIT:
+            move = self.pursuit.choose(obs, self.world, self.pursuit_foe, action, self.active_mode)
+            if move is not None:
+                action["move"] = list(move)
+                action["boost"] = True
+                self.previous_move = move
+                self.sprinting = True
         return action
 
 
