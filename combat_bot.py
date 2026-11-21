@@ -4,7 +4,6 @@ import math
 
 import mechfight as mf
 from route_bot import Bot as RouteBot
-from sustained_recovery import SustainedRecovery
 from weapon_control import target_body, weapon_plan
 
 
@@ -14,14 +13,12 @@ def unit(x, y):
 
 
 class Bot(RouteBot):
-    name = "sustained-cover-recovery-v30"
-    SUSTAIN_COVER_RECOVERY = True
+    name = "offensive-upgrades-and-kill-loot"
 
     def __init__(self, hello):
         super().__init__(hello)
         self.rules = hello["config"]
         self.slot = hello["slot"]
-        self.sustained_recovery = SustainedRecovery(self.rules)
 
     def fight_target(self, obs, me, position):
         muzzle = (position[0], position[1], me["pos"][2] + me["stats"]["muzzle_height"])
@@ -72,11 +69,11 @@ class Bot(RouteBot):
                     return [x, y]
         return preferred
 
-    def combat_action(self, obs):
+    def act(self, obs):
         action = super().act(obs)
         me = obs["self"]
         position = tuple(me["pos"][:2])
-        if self.active_mode not in {"fight", "hold", "rotate", "cover"}:
+        if self.active_mode not in {"fight", "hold", "rotate", "cover", "kill-cubes"}:
             return action
         foe = self.fight_target(obs, me, position)
         if foe is None or obs["t"] < self.recovery_until:
@@ -99,7 +96,9 @@ class Bot(RouteBot):
         zone = obs["zone"]
         required = max(0.0, math.dist(position, zone["next_center"]) - zone["next_radius"])
         slack = zone["shrink_end"] - obs["t"]
-        if can_fight and (required < 3.0 or slack > 12.0 + 2.0 * required / me["stats"]["walk_speed"]):
+        if can_fight and self.active_mode != "kill-cubes" and (
+            required < 3.0 or slack > 12.0 + 2.0 * required / me["stats"]["walk_speed"]
+        ):
             action["move"] = self.strafe(obs, foe, position, action["move"])
             action["boost"] = me["energy"] > 47 and (distance < 42 or distance > 130)
             self.previous_move = tuple(action["move"])
@@ -109,35 +108,6 @@ class Bot(RouteBot):
         action["fire"] = triggers if can_fight or distance < 29 else [False, False]
         if any(action["fire"]):
             action["reload"] = False
-        return action
-
-    def act(self, obs):
-        action = self.combat_action(obs)
-        if not self.SUSTAIN_COVER_RECOVERY:
-            return action
-        if obs["t"] < self.recovery_until:
-            self.sustained_recovery.abandon(obs["t"])
-            return action
-        foe = self.sustained_recovery.choose(
-            obs, self.world, action, self.active_mode,
-            self.last_damage_at, self.hit_at, self.resource_goal,
-        )
-        if foe is None:
-            return action
-
-        me = obs["self"]
-        dx, dy = (b - a for a, b in zip(me["pos"][:2], foe["pos"][:2]))
-        action["aim"] = [math.atan2(dy, dx), 0.0]
-        action["move"] = [0.0, 0.0]
-        action["fire"] = [False, False]
-        action["boost"] = action["jump"] = False
-        if any(weapon and weapon["kind"] == "gun" and weapon.get("ammo", 0) < weapon["stats"]["mag"]
-               and weapon.get("reload", 0.0) == 0.0 for weapon in me["weapons"]):
-            action["reload"] = True
-        self.previous_move = (0.0, 0.0)
-        self.sprinting = False
-        if obs["tick"] % 10 == 0:
-            mf.draw.label(f"covered recovery | hp {me['hp']:.0f}")
         return action
 
 
