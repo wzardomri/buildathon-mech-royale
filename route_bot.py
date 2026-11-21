@@ -263,12 +263,21 @@ def within_radius(position, center, radius):
 class Bot:
     name = "early-weapon-detours-v6"
     SEEK_RESOURCES = True
-    SEEK_KILL_LOOT = True
     PICKUP_PRIORITY = {"laser": 3, "lightning": 2, "mortar": 1}
     DETOUR_DISTANCE = {"laser": 36.0, "lightning": 26.0, "mortar": 19.0}
+    OFFENSIVE_UPGRADES = True
     UPGRADE_PRIORITY = {
         "armor": 0, "nanites": 1, "servos": 2, "plating": 3,
         "reactor": 4, "capacitor": 5, "sensors": 6,
+    }
+    OFFENSIVE_UPGRADE_VALUE = {
+        "plating": 0.17, "armor": 0.13, "nanites": 0.14, "servos": 0.13,
+        "reactor": 0.05, "capacitor": 0.04, "sensors": 0.09,
+        "gyros": 0.07, "jets": 0.07,
+        "gun_damage": 0.18, "gun_rate": 0.11, "gun_velocity": 0.13,
+        "mortar_velocity": 0.21, "mortar_splash": 0.14, "mortar_reload": 0.17,
+        "laser_charge": 0.20, "laser_damage": 0.24, "laser_pierce": 0.03,
+        "lightning_range": 0.25, "lightning_efficiency": 0.17, "lightning_chain": 0.04,
     }
 
     def __init__(self, hello):
@@ -294,9 +303,6 @@ class Bot:
         self.combat_target = None
         self.combat_checked_at = -math.inf
         self.strafe_sign = 1 if hello["seed"] % 2 else -1
-        self.last_enemy_positions = {}
-        self.kill_position = None
-        self.kill_until = -math.inf
 
     def threat_sources(self, obs, position, enemies):
         now = obs["t"]
@@ -529,46 +535,21 @@ class Bot:
                 return min(weapons)[1], "weapon"
         return None
 
-    def track_confirmed_kills(self, obs, enemies):
-        now = obs["t"]
-        for enemy in enemies:
-            self.last_enemy_positions[enemy["id"]] = (now, tuple(enemy["pos"][:2]))
-        for event in obs["events"]:
-            if event["type"] == "kill":
-                seen_at, point = self.last_enemy_positions.get(event["target"], (-math.inf, None))
-                if now - seen_at <= 3.0:
-                    self.kill_position, self.kill_until = point, now + 6.0
-
-    def nearby_kill_cube(self, obs, position, enemies, next_center, next_radius):
-        me, zone, now = obs["self"], obs["zone"], obs["t"]
-        if (self.kill_position is None or now >= self.kill_until or me["cubes"] >= 10
-                or me["hp"] < me["max_hp"] * 0.40 or now - self.last_player_damage_at < 1.0):
-            return None
-        options = sorted(
-            (math.dist(position, cube["pos"][:2]), cube["id"], cube["pos"])
-            for cube in obs["cubes"] if math.dist(self.kill_position, cube["pos"][:2]) <= 13.0
-        )
-        for distance, _, value in options[:6]:
-            point = tuple(value[:2])
-            if (distance > 30.0 or math.dist(point, next_center) > next_radius
-                    or math.dist(point, zone["center"]) > zone["radius"] - 4.0
-                    or self.world.nearest_open(point, search=1) is None):
-                continue
-            ground = self.world.ground(*point)
-            if abs(value[2] - ground) > 3.2:
-                continue
-            cover_height = ground + me["stats"]["muzzle_height"]
-            exposed = []
-            for enemy in enemies:
-                separation = math.dist(enemy["pos"][:2], point)
-                if separation < 80.0 and not self.world.blocked_between(
-                    (*enemy["pos"][:2], enemy["pos"][2] + 7.0), (*point, cover_height)
-                ):
-                    exposed.append(separation)
-            if len(exposed) > 1 or (exposed and (exposed[0] <= 48.0 or me["hp"] < me["max_hp"] * 0.72)):
-                continue
-            return point
-        return None
+    def upgrade_value(self, upgrade, me):
+        value = self.OFFENSIVE_UPGRADE_VALUE.get(upgrade, 0.0)
+        if upgrade == "gun_mag":
+            weapon = next((weapon for weapon in me["weapons"] if weapon and weapon["kind"] == "gun"), None)
+            if weapon:
+                stats = weapon["stats"]
+                old_cycle = (stats["mag"] - 1) * stats["cooldown"] + stats["reload"]
+                more_rounds = stats["mag"] + 8
+                new_cycle = (more_rounds - 1) * stats["cooldown"] + stats["reload"] * 0.8
+                value = min(0.30, more_rounds * old_cycle / (stats["mag"] * new_cycle) - 1)
+        elif upgrade == "armor":
+            value += me["stats"].get("armor", 0.0) * 0.25
+        elif upgrade == "nanites" and me["hp"] < me["max_hp"] * 0.60:
+            value += 0.04
+        return value
 
     def act(self, obs):
         me, zone, now = obs["self"], obs["zone"], obs["t"]
@@ -632,15 +613,6 @@ class Bot:
                 else:
                     self.combat_goal = None
 
-        if self.SEEK_KILL_LOOT:
-            self.track_confirmed_kills(obs, enemies)
-            charging = any(weapon and weapon.get("charge", 0.0) > 0 for weapon in me["weapons"])
-            protected = urgent or retreat or finish or charging or now < self.recovery_until or mode == "supply"
-            if not protected:
-                reward = self.nearby_kill_cube(obs, position, enemies, next_center, next_radius)
-                if reward is not None:
-                    goal, mode = reward, "kill-cubes"
-
         moving = math.hypot(*self.previous_move) > 0.1
         slow = math.hypot(*me["vel"][:2]) < 0.9
         self.stalled_for = self.stalled_for + 1 if moving and slow else 0
@@ -668,7 +640,7 @@ class Bot:
                 self.last_goal = goal
                 self.replanned_at = now
             waypoint = self.waypoints[0] if self.waypoints else goal
-            if mode in {"cube", "weapon", "early-weapon", "supply", "kill-cubes"} and len(self.waypoints) <= 1 and math.dist(position, goal) < 8.0:
+            if mode in {"cube", "weapon", "early-weapon", "supply"} and len(self.waypoints) <= 1 and math.dist(position, goal) < 8.0:
                 body_height = me["stats"]["height"] / 2.0
                 if not self.world.blocked_between(
                     (*position, me["pos"][2] + body_height), (*goal, self.world.ground(*goal) + body_height)
@@ -711,10 +683,13 @@ class Bot:
 
         if obs["offer"]:
             choices = obs["offer"]["choices"]
-            action["pick"] = min(
-                range(len(choices)),
-                key=lambda i: self.UPGRADE_PRIORITY.get(choices[i]["id"], len(self.UPGRADE_PRIORITY)),
-            )
+            if self.OFFENSIVE_UPGRADES:
+                action["pick"] = max(range(len(choices)), key=lambda i: self.upgrade_value(choices[i]["id"], me))
+            else:
+                action["pick"] = min(
+                    range(len(choices)),
+                    key=lambda i: self.UPGRADE_PRIORITY.get(choices[i]["id"], len(self.UPGRADE_PRIORITY)),
+                )
         self.active_mode = mode
         return action
 
