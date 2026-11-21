@@ -265,9 +265,19 @@ class Bot:
     SEEK_RESOURCES = True
     PICKUP_PRIORITY = {"laser": 3, "lightning": 2, "mortar": 1}
     DETOUR_DISTANCE = {"laser": 36.0, "lightning": 26.0, "mortar": 19.0}
+    OFFENSIVE_UPGRADES = True
     UPGRADE_PRIORITY = {
         "armor": 0, "nanites": 1, "servos": 2, "plating": 3,
         "reactor": 4, "capacitor": 5, "sensors": 6,
+    }
+    OFFENSIVE_UPGRADE_VALUE = {
+        "plating": 0.17, "armor": 0.13, "nanites": 0.14, "servos": 0.13,
+        "reactor": 0.05, "capacitor": 0.04, "sensors": 0.09,
+        "gyros": 0.07, "jets": 0.07,
+        "gun_damage": 0.18, "gun_rate": 0.11, "gun_velocity": 0.13,
+        "mortar_velocity": 0.21, "mortar_splash": 0.14, "mortar_reload": 0.17,
+        "laser_charge": 0.20, "laser_damage": 0.24, "laser_pierce": 0.03,
+        "lightning_range": 0.25, "lightning_efficiency": 0.17, "lightning_chain": 0.04,
     }
 
     def __init__(self, hello):
@@ -525,6 +535,22 @@ class Bot:
                 return min(weapons)[1], "weapon"
         return None
 
+    def upgrade_value(self, upgrade, me):
+        value = self.OFFENSIVE_UPGRADE_VALUE.get(upgrade, 0.0)
+        if upgrade == "gun_mag":
+            weapon = next((weapon for weapon in me["weapons"] if weapon and weapon["kind"] == "gun"), None)
+            if weapon:
+                stats = weapon["stats"]
+                old_cycle = (stats["mag"] - 1) * stats["cooldown"] + stats["reload"]
+                more_rounds = stats["mag"] + 8
+                new_cycle = (more_rounds - 1) * stats["cooldown"] + stats["reload"] * 0.8
+                value = min(0.30, more_rounds * old_cycle / (stats["mag"] * new_cycle) - 1)
+        elif upgrade == "armor":
+            value += me["stats"].get("armor", 0.0) * 0.25
+        elif upgrade == "nanites" and me["hp"] < me["max_hp"] * 0.60:
+            value += 0.04
+        return value
+
     def act(self, obs):
         me, zone, now = obs["self"], obs["zone"], obs["t"]
         position = tuple(me["pos"][:2])
@@ -657,10 +683,13 @@ class Bot:
 
         if obs["offer"]:
             choices = obs["offer"]["choices"]
-            action["pick"] = min(
-                range(len(choices)),
-                key=lambda i: self.UPGRADE_PRIORITY.get(choices[i]["id"], len(self.UPGRADE_PRIORITY)),
-            )
+            if self.OFFENSIVE_UPGRADES:
+                action["pick"] = max(range(len(choices)), key=lambda i: self.upgrade_value(choices[i]["id"], me))
+            else:
+                action["pick"] = min(
+                    range(len(choices)),
+                    key=lambda i: self.UPGRADE_PRIORITY.get(choices[i]["id"], len(self.UPGRADE_PRIORITY)),
+                )
         self.active_mode = mode
         return action
 
