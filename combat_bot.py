@@ -3,8 +3,8 @@
 import math
 
 import mechfight as mf
-from reload_timing import ReloadTiming
 from route_bot import Bot as RouteBot
+from sustained_recovery import SustainedRecovery
 from weapon_control import target_body, weapon_plan
 
 
@@ -14,14 +14,14 @@ def unit(x, y):
 
 
 class Bot(RouteBot):
-    name = "defer-exposed-reload-v27"
-    DEFER_EXPOSED_RELOAD = True
+    name = "sustained-cover-recovery-v30"
+    SUSTAIN_COVER_RECOVERY = True
 
     def __init__(self, hello):
         super().__init__(hello)
         self.rules = hello["config"]
         self.slot = hello["slot"]
-        self.reload_timing = ReloadTiming(self.rules)
+        self.sustained_recovery = SustainedRecovery(self.rules)
 
     def fight_target(self, obs, me, position):
         muzzle = (position[0], position[1], me["pos"][2] + me["stats"]["muzzle_height"])
@@ -113,8 +113,31 @@ class Bot(RouteBot):
 
     def act(self, obs):
         action = self.combat_action(obs)
-        if self.DEFER_EXPOSED_RELOAD and self.reload_timing.defer(obs, self.world, action, self.active_mode):
-            action["reload"] = False
+        if not self.SUSTAIN_COVER_RECOVERY:
+            return action
+        if obs["t"] < self.recovery_until:
+            self.sustained_recovery.abandon(obs["t"])
+            return action
+        foe = self.sustained_recovery.choose(
+            obs, self.world, action, self.active_mode,
+            self.last_damage_at, self.hit_at, self.resource_goal,
+        )
+        if foe is None:
+            return action
+
+        me = obs["self"]
+        dx, dy = (b - a for a, b in zip(me["pos"][:2], foe["pos"][:2]))
+        action["aim"] = [math.atan2(dy, dx), 0.0]
+        action["move"] = [0.0, 0.0]
+        action["fire"] = [False, False]
+        action["boost"] = action["jump"] = False
+        if any(weapon and weapon["kind"] == "gun" and weapon.get("ammo", 0) < weapon["stats"]["mag"]
+               and weapon.get("reload", 0.0) == 0.0 for weapon in me["weapons"]):
+            action["reload"] = True
+        self.previous_move = (0.0, 0.0)
+        self.sprinting = False
+        if obs["tick"] % 10 == 0:
+            mf.draw.label(f"covered recovery | hp {me['hp']:.0f}")
         return action
 
 
