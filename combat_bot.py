@@ -3,7 +3,6 @@
 import math
 
 import mechfight as mf
-from projectile_evasion import evasive_move
 from route_bot import Bot as RouteBot
 from weapon_control import target_body, weapon_plan
 
@@ -14,27 +13,12 @@ def unit(x, y):
 
 
 class Bot(RouteBot):
-    name = "duel-projectile-evasion-v16"
-    EVADE_IMMINENT_SHOTS = True
+    name = "guarded-ground-shortcuts"
 
     def __init__(self, hello):
         super().__init__(hello)
         self.rules = hello["config"]
         self.slot = hello["slot"]
-
-    def can_evade(self, obs, foe, action, distance, guarded_strafe, required, slack):
-        if (not self.EVADE_IMMINENT_SHOTS or not guarded_strafe or not obs["projectiles"]
-                or self.active_mode == "cover" or not 24.0 <= distance <= 145.0
-                or (required >= 3.0 and slack <= 20.0 + 2.0 * required / obs["self"]["stats"]["walk_speed"])):
-            return False
-        me = obs["self"]
-        if any(other["kind"] == "mech" and other["id"] != foe["id"] and math.dist(other["pos"], me["pos"]) < 145.0
-               for other in obs["mechs"]):
-            return False
-        return not any(
-            weapon and weapon["kind"] == "laser" and (weapon.get("charge", 0.0) > 0.0 or firing)
-            for weapon, firing in zip(me["weapons"], action["fire"])
-        )
 
     def fight_target(self, obs, me, position):
         muzzle = (position[0], position[1], me["pos"][2] + me["stats"]["muzzle_height"])
@@ -112,22 +96,14 @@ class Bot(RouteBot):
         zone = obs["zone"]
         required = max(0.0, math.dist(position, zone["next_center"]) - zone["next_radius"])
         slack = zone["shrink_end"] - obs["t"]
-        guarded_strafe = False
         if can_fight and (required < 3.0 or slack > 12.0 + 2.0 * required / me["stats"]["walk_speed"]):
-            route_move = action["move"]
-            action["move"] = self.strafe(obs, foe, position, route_move)
-            guarded_strafe = action["move"] is not route_move
+            action["move"] = self.strafe(obs, foe, position, action["move"])
             action["boost"] = me["energy"] > 47 and (distance < 42 or distance > 130)
             self.previous_move = tuple(action["move"])
             self.sprinting = action["boost"]
         aim, triggers = weapon_plan(me, foe, self.world, self.rules, retreat=not can_fight)
         action["aim"] = aim
         action["fire"] = triggers if can_fight or distance < 29 else [False, False]
-        if self.can_evade(obs, foe, action, distance, guarded_strafe, required, slack):
-            alternative = evasive_move(obs, self.world, action["move"], action["boost"])
-            if alternative is not None:
-                action["move"] = list(alternative)
-                self.previous_move = alternative
         if any(action["fire"]):
             action["reload"] = False
         return action
