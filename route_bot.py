@@ -661,6 +661,7 @@ class Bot:
                 range(len(choices)),
                 key=lambda i: self.UPGRADE_PRIORITY.get(choices[i]["id"], len(self.UPGRADE_PRIORITY)),
             )
+        self.active_mode = mode
         return action
 
 
