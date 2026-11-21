@@ -1,7 +1,7 @@
-# Mech Royale ground router
+# Mech Royale
 
-This entry chooses walking routes through the arena, moves toward the next safe circle, and sidesteps if it gets stuck. It uses the organizer-provided `mechfight.py` wrapper for the bot protocol. [Builders Mech Royale track and starter kit](https://www.joinbuilders.org/buildathon/tracks/builders)
+SophiaOmri's entry for the [Builders Buildathon](https://www.joinbuilders.org/buildathon/tracks/builders). The bot plans routes from the official arena geometry, collects viable early weapon pickups, leads moving opponents, and attempts to stay inside the closing zone.
 
-Build from this directory with `docker build -t mech-ground-route .`. The scorer mounts the official map at `/arena`.
+Build with `docker build --platform linux/amd64 -t mech-royale .`. The official runner mounts the arena at `/arena` and communicates over the published Mech Royale JSON Lines protocol. Use the official kit's `check/check.py` for conformance.
 
-The entry code is released under the MIT License.
+The entry code is MIT-licensed. It uses the organizer-provided Python `mechfight.py` wrapper from the official starter kit.

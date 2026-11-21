@@ -8,7 +8,6 @@ from pathlib import Path
 import sys
 
 import mechfight as mf
-from laser_defense import LaserDefense
 from weapon_control import target_body, weapon_plan
 
 
@@ -262,9 +261,10 @@ def within_radius(position, center, radius):
 
 
 class Bot:
-    name = "farm-and-laser-denial"
+    name = "early-weapon-detours-v6"
     SEEK_RESOURCES = True
     PICKUP_PRIORITY = {"laser": 3, "lightning": 2, "mortar": 1}
+    DETOUR_DISTANCE = {"laser": 36.0, "lightning": 26.0, "mortar": 19.0}
     UPGRADE_PRIORITY = {
         "armor": 0, "nanites": 1, "servos": 2, "plating": 3,
         "reactor": 4, "capacitor": 5, "sensors": 6,
@@ -273,7 +273,6 @@ class Bot:
     def __init__(self, hello):
         config = hello["config"]
         self.config = config
-        self.laser_defense = LaserDefense(config)
         self.world = GroundMap(Path(hello["map"]["dir"]) / "v2", config["mech"])
         self.waypoints = []
         self.last_goal = None
@@ -439,6 +438,37 @@ class Bot:
                 available.append((self.PICKUP_PRIORITY[weapon], -distance, pickup["id"]))
         return max(available)[2] if available else None
 
+    def early_weapon_detour(self, obs, position, distance_to_enemy):
+        me, zone, now = obs["self"], obs["zone"], obs["t"]
+        before_shrink = zone["shrink_start"] - now
+        if (me["weapons"][1] is not None or distance_to_enemy < 105.0 or not me["grounded"]
+                or me["hp"] < 0.76 * me["max_hp"] or not me["in_zone"] or now > 48.0
+                or before_shrink < 9.0 or now - self.last_player_damage_at < 3.0):
+            return None
+
+        next_radius = max(0.0, zone["next_radius"] - 9.0)
+        current_return = max(0.0, math.dist(position, zone["next_center"]) - next_radius)
+        held = {weapon["kind"] for weapon in me["weapons"] if weapon}
+        options = []
+        for pickup in obs["pickups"]:
+            weapon = pickup["kind"]
+            if weapon in held or weapon not in self.DETOUR_DISTANCE:
+                continue
+            point = tuple(pickup["pos"][:2])
+            distance = math.dist(position, point)
+            if distance > self.DETOUR_DISTANCE[weapon] or math.dist(point, zone["center"]) > zone["radius"] - 9.0:
+                continue
+            if abs(pickup["pos"][2] - self.world.ground(*point)) > 2.8:
+                continue
+            detour_return = max(0.0, math.dist(point, zone["next_center"]) - next_radius)
+            extra = max(0.0, distance + detour_return - current_return)
+            seconds = 1.7 * (distance + detour_return) / me["stats"]["walk_speed"]
+            if before_shrink < 5.0 + seconds or extra > self.DETOUR_DISTANCE[weapon] * 1.45:
+                continue
+            merit = distance + 0.5 * extra - 9.0 * self.PICKUP_PRIORITY[weapon]
+            options.append((merit, pickup["id"], point))
+        return min(options)[2] if options else None
+
     def resource_goal(self, obs, position, enemies):
         me, zone = obs["self"], obs["zone"]
         if any(sound["dist"] == "near" and sound["kind"] in {"gun", "mortar", "lightning", "laser"}
@@ -534,6 +564,10 @@ class Bot:
                 mode = "cover"
         else:
             self.cover_goal = None
+            if mode == "rotate":
+                weapon = self.early_weapon_detour(obs, position, distance)
+                if weapon is not None:
+                    goal, mode = weapon, "early-weapon"
             if mode == "hold":
                 if self.SEEK_RESOURCES and distance > 120.0 and not incoming:
                     resource = self.resource_goal(obs, position, enemies)
@@ -580,7 +614,7 @@ class Bot:
                 self.last_goal = goal
                 self.replanned_at = now
             waypoint = self.waypoints[0] if self.waypoints else goal
-            if mode in {"cube", "weapon", "supply"} and len(self.waypoints) <= 1 and math.dist(position, goal) < 8.0:
+            if mode in {"cube", "weapon", "early-weapon", "supply"} and len(self.waypoints) <= 1 and math.dist(position, goal) < 8.0:
                 body_height = me["stats"]["height"] / 2.0
                 if not self.world.blocked_between(
                     (*position, me["pos"][2] + body_height), (*goal, self.world.ground(*goal) + body_height)
@@ -591,26 +625,17 @@ class Bot:
             magnitude = min(1.0, math.dist(position, waypoint) / 5.0)
             move = desired[0] * magnitude, desired[1] * magnitude
 
+        self.previous_move = move
         speed = math.hypot(*move)
         energy_floor = (6.0 if urgent else 23.0) if self.sprinting else (14.0 if urgent else 50.0)
         self.sprinting = (urgent or retreat) and me["energy"] >= energy_floor and speed > 0.8
-        boost = self.sprinting
-        if not urgent and zone["radius"] > 9.0:
-            move, boost, shooter, dodged = self.laser_defense.choose(obs, self.world, enemies, move, boost, goal)
-            if dodged:
-                mode = "laser-cover"
-            elif shooter is not None and (not finish or target is None):
-                target = shooter
-                mode = "laser-counter"
-        self.previous_move = move
-        speed = math.hypot(*move)
         yaw = math.atan2(move[1], move[0]) if speed > 0.1 else math.remainder(now * 0.65 + self.scanning_offset, 2 * math.pi)
-        action = {"move": list(move), "boost": boost, "aim": [yaw, 0.0], "jump": recovering and me["grounded"]}
+        action = {"move": list(move), "boost": self.sprinting, "aim": [yaw, 0.0], "jump": recovering and me["grounded"]}
 
         if target:
-            aim, fire = weapon_plan(me, target, self.world, self.config, retreat=retreat or urgent or mode == "laser-cover")
+            aim, fire = weapon_plan(me, target, self.world, self.config, retreat=retreat or urgent)
             action["aim"] = list(aim)
-            if finish or not retreat or incoming or target_distance < 75.0 or mode == "laser-counter":
+            if finish or not retreat or incoming or target_distance < 75.0:
                 action["fire"] = fire
         elif self.last_damage_bearing is not None and now - self.last_damage_at < 2.0:
             action["aim"] = [self.last_damage_bearing, 0.0]
