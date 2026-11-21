@@ -269,6 +269,9 @@ def within_radius(position, center, radius):
     return center[0] + radius * dx, center[1] + radius * dy
 
 
+from market_survey import MarketSurvey
+
+
 class Bot:
     name = "early-weapon-detours-v6"
     SEEK_RESOURCES = True
@@ -313,6 +316,7 @@ class Bot:
         self.combat_checked_at = -math.inf
         self.strafe_sign = 1 if hello["seed"] % 2 else -1
         self.colliding_route = CollidingRoute(self.world)
+        self.survey = MarketSurvey()
 
     def threat_sources(self, obs, position, enemies):
         now = obs["t"]
@@ -623,6 +627,7 @@ class Bot:
                 else:
                     self.combat_goal = None
 
+        mode, goal, target = self.survey.route(self, obs, mode, goal, target)
         moving = math.hypot(*self.previous_move) > 0.1
         slow = math.hypot(*me["vel"][:2]) < 0.9
         self.stalled_for = self.stalled_for + 1 if moving and slow else 0
