@@ -13,7 +13,7 @@ def unit(x, y):
 
 
 class Bot(RouteBot):
-    name = "offensive-upgrades-v13"
+    name = "opening-route-loot"
 
     def __init__(self, hello):
         super().__init__(hello)
