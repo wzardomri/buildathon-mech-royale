@@ -3,6 +3,7 @@
 import math
 
 import mechfight as mf
+from reload_timing import ReloadTiming
 from route_bot import Bot as RouteBot
 from weapon_control import target_body, weapon_plan
 
@@ -13,12 +14,14 @@ def unit(x, y):
 
 
 class Bot(RouteBot):
-    name = "guarded-ground-shortcuts"
+    name = "defer-exposed-reload-v27"
+    DEFER_EXPOSED_RELOAD = True
 
     def __init__(self, hello):
         super().__init__(hello)
         self.rules = hello["config"]
         self.slot = hello["slot"]
+        self.reload_timing = ReloadTiming(self.rules)
 
     def fight_target(self, obs, me, position):
         muzzle = (position[0], position[1], me["pos"][2] + me["stats"]["muzzle_height"])
@@ -69,7 +72,7 @@ class Bot(RouteBot):
                     return [x, y]
         return preferred
 
-    def act(self, obs):
+    def combat_action(self, obs):
         action = super().act(obs)
         me = obs["self"]
         position = tuple(me["pos"][:2])
@@ -105,6 +108,12 @@ class Bot(RouteBot):
         action["aim"] = aim
         action["fire"] = triggers if can_fight or distance < 29 else [False, False]
         if any(action["fire"]):
+            action["reload"] = False
+        return action
+
+    def act(self, obs):
+        action = self.combat_action(obs)
+        if self.DEFER_EXPOSED_RELOAD and self.reload_timing.defer(obs, self.world, action, self.active_mode):
             action["reload"] = False
         return action
 

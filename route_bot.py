@@ -246,41 +246,6 @@ class GroundMap:
         route.reverse()
         return route
 
-    def shortcut_clear(self, me, target):
-        start = tuple(me["pos"][:2])
-        distance = math.dist(start, target)
-        if not 5.0 < distance <= 25.0 or self.cell(start) not in self.open:
-            return False
-
-        stats = me["stats"]
-        dx, dy = target[0] - start[0], target[1] - start[1]
-        side_x, side_y = -dy / distance, dx / distance
-        steps = math.ceil(distance / 2.0)
-        previous_cell = self.cell(start)
-        previous_z = self.ground(*start)
-        for index in range(1, steps + 1):
-            ratio = index / steps
-            point = start[0] + dx * ratio, start[1] + dy * ratio
-            cell = self.cell(point)
-            ground = self.ground(*point)
-            if cell not in self.open or abs(ground - previous_z) > self.max_slope * distance / steps:
-                return False
-            if cell[0] != previous_cell[0] and cell[1] != previous_cell[1]:
-                if (cell[0], previous_cell[1]) not in self.open or (previous_cell[0], cell[1]) not in self.open:
-                    return False
-            previous_cell, previous_z = cell, ground
-
-        end_z = self.ground(*target)
-        radius = stats["radius"] + 0.3
-        for side in (-radius, 0.0, radius):
-            offset_x, offset_y = side_x * side, side_y * side
-            for height in (stats["step_up"] + 0.35, stats["height"] - 0.2):
-                a = start[0] + offset_x, start[1] + offset_y, me["pos"][2] + height
-                b = target[0] + offset_x, target[1] + offset_y, end_z + height
-                if self.blocked_between(a, b):
-                    return False
-        return True
-
 
 def unit_toward(position, goal):
     dx, dy = goal[0] - position[0], goal[1] - position[1]
@@ -674,13 +639,6 @@ class Bot:
                 self.waypoints = self.world.route(position, goal)
                 self.last_goal = goal
                 self.replanned_at = now
-            if me["grounded"] and len(self.waypoints) > 1:
-                # Coalesce nearby route cells only when the wider body still
-                # clears the line. Keep the normal A* turn at walls and ledges.
-                for index in range(min(4, len(self.waypoints) - 1), 0, -1):
-                    if self.world.shortcut_clear(me, self.waypoints[index]):
-                        del self.waypoints[:index]
-                        break
             waypoint = self.waypoints[0] if self.waypoints else goal
             if mode in {"cube", "weapon", "early-weapon", "supply"} and len(self.waypoints) <= 1 and math.dist(position, goal) < 8.0:
                 body_height = me["stats"]["height"] / 2.0
