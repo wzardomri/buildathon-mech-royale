@@ -4,6 +4,7 @@ import math
 
 import mechfight as mf
 from projectile_evasion import clears_route, evasive_move, projected_motion
+from combat_cadence import CombatCadence
 from route_bot import Bot as RouteBot
 from weapon_control import target_body, weapon_plan
 
@@ -22,6 +23,7 @@ class Bot(RouteBot):
         self.slot = hello["slot"]
         self.last_policy = "base"
         self.dodge_plan = None
+        self.combat_cadence = CombatCadence(self.slot)
 
     def fight_target(self, obs, me, position):
         muzzle = (position[0], position[1], me["pos"][2] + me["stats"]["muzzle_height"])
@@ -114,6 +116,7 @@ class Bot(RouteBot):
     def act(self, obs):
         self.last_policy = "base"
         action = self.combat_action(obs)
+        self.combat_cadence.apply(self, obs, action)
         me = obs["self"]
         if (self.active_mode not in {"fight", "hold", "rotate", "cover"} or action.get("jump")
                 or not obs["projectiles"] or not me["in_zone"]
